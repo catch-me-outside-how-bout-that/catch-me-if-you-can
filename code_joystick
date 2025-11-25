@@ -1,0 +1,22 @@
+from machine import ADC, Pin
+import math
+from time import sleep
+
+# korrekt für Arduino Nano ESP32 S3 + dein Grove-Board
+joystick_y = ADC(Pin(2), atten=ADC.ATTN_11DB)
+joystick_x = ADC(Pin(1), atten=ADC.ATTN_11DB)
+
+while True:
+    x = joystick_x.read()
+    y = joystick_y.read()
+
+    # Calculate the joystick position on a circle
+    x_pos = x - 1940   # subtract x center position
+    y_pos = y - 1895   # subtract y center position
+
+    angle = int(180 * math.atan2(y_pos, x_pos) / math.pi)
+    angle = (angle + 180) % 360   # Map -180..180 to 0..360
+
+    print("X:", x_pos, "Y:", y_pos, "Angle:", angle)
+
+#sleep(3)
