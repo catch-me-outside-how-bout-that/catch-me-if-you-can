@@ -1,0 +1,196 @@
+# board2_slave.py  (Player 2 / Client ESP32)
+
+from time import sleep, time
+from machine import I2C, Pin, ADC
+from ht16k33 import HT16K33Matrix
+import network
+import espnow
+import ujson
+
+def jetzt_ms():
+    return int(time() * 1000)
+
+# ---- Joystick ----
+vrx = ADC(Pin(3), atten=ADC.ATTN_11DB)
+vry = ADC(Pin(4), atten=ADC.ATTN_11DB)
+
+CENTER_X = 1940
+CENTER_Y = 1895
+DEADZONE = 200
+MOVE_DELAY_MS = 120
+SPEED_BOOST_DELAY_MS = 70
+
+# ---- Display ----
+display = HT16K33Matrix(I2C(0))
+display.set_angle(270)
+
+# ---- Buttons ----
+button_red = Pin("A0", Pin.IN, Pin.PULL_UP)
+button_blue = Pin("A1", Pin.IN, Pin.PULL_UP)
+
+# ---- Maps (identisch zu Board 1) ----
+maps = [
+    b"\x00\x66\x42\x58\x0b\x20\x6e\x00",
+    b"\x00\x6e\x42\x10\x70\x06\x22\x30",
+    b"\x10\x18\x4a\x63\x32\x00\x2c\x20",
+    b"\x00\x46\x6c\x20\x22\x0a\x7a\x00"
+]
+
+
+# ---------------------------------------------------------
+# ESP-NOW Setup (SLAVE)
+# ---------------------------------------------------------
+w = network.WLAN(network.STA_IF)
+w.active(True)
+
+e = espnow.ESPNow()
+e.active(True)
+
+# <-- TRAGE HIER DIE MAC-ADRESSE VON BOARD 1 (MASTER) EIN !!!
+peer_mac = b'\xec\xda;a\\\xa4'   # <-- HIER EINTRAGEN!
+try:
+    e.add_peer(peer_mac)
+except Exception as err:
+    print("add_peer error:", err)
+
+
+# ---------------------------------------------------------
+# Hilfsfunktionen
+# ---------------------------------------------------------
+
+def read_joystick():
+    x_raw = vrx.read()
+    y_raw = vry.read()
+    x_pos = x_raw - CENTER_X
+    y_pos = y_raw - CENTER_Y
+
+    dx = 0
+    dy = 0
+
+    if abs(x_pos) > DEADZONE:
+        dx = 1 if x_pos > 0 else -1
+    if abs(y_pos) > DEADZONE:
+        dy = 1 if y_pos > 0 else -1
+
+    return dx, dy
+
+def kollision_wand(x, y, map_bytes):
+    if x < 0 or x > 7 or y < 0 or y > 7:
+        return True
+    log_x = 7 - y
+    log_y = x
+    bit_mask = 1 << (7 - log_x)
+    return (map_bytes[log_y] & bit_mask) != 0
+
+
+# ---------------------------------------------------------
+# SPIELVARIABLES (CLIENT)
+# ---------------------------------------------------------
+
+rolle = "Warte..."
+map_index = 0
+karte = maps[0]
+
+p1_x = p1_y = 0
+p2_x = p2_y = 0
+
+remaining_ms = 120000
+
+speed_until = 0
+invis_until = 0
+
+
+# ---------------------------------------------------------
+# MAIN LOOP
+# ---------------------------------------------------------
+
+def warte_auf_start():
+    global rolle, map_index, karte, p1_x, p1_y, p2_x, p2_y
+
+    display.clear()
+    display.scroll_text("Warte auf Start")
+    sleep(0.3)
+
+    while True:
+        recv = e.recv()
+        if recv:
+            mac, msg = recv
+            try:
+                data = ujson.loads(msg.decode())
+            except:
+                continue
+
+            if data.get("type") == "start":
+                rolle = data["role_for_peer"]
+                map_index = data["map_index"]
+                karte = maps[map_index]
+                
+                display.clear()
+                display.scroll_text(f"Du bist: {rolle}")
+                sleep(0.5)
+                return
+
+
+def starte_client_game():
+    global p1_x, p1_y, p2_x, p2_y
+    global speed_until, invis_until, remaining_ms
+
+    while True:
+
+        # ---- Eingaben senden ----
+        dx, dy = read_joystick()
+        red = 1 if button_red.value() == 0 else 0
+        blue = 1 if button_blue.value() == 0 else 0
+
+        packet = {"dx": dx, "dy": dy, "red": red, "blue": blue}
+        try:
+            e.send(peer_mac, ujson.dumps(packet))
+        except:
+            pass
+
+        # ---- Master-State empfangen ----
+        recv = e.recv()
+        if recv:
+            mac, msg = recv
+            try:
+                data = ujson.loads(msg.decode())
+            except:
+                data = {}
+
+            if data.get("type") == "state":
+
+                p1_x = data["p1_x"]
+                p1_y = data["p1_y"]
+                p2_x = data["p2_x"]
+                p2_y = data["p2_y"]
+
+                rolle = data["role_for_peer"]
+                map_index = data["map_index"]
+                karte = maps[map_index]
+
+                remaining_ms = data["remaining_ms"]
+
+        # ---- Render ----
+        display.clear()
+        display.set_icon(karte).draw()
+
+        # Always show P1 (Master player)
+        display.plot(p1_x, p1_y, 1)
+
+        # Own player visibility
+        if jetzt_ms() >= invis_until:
+            display.plot(p2_x, p2_y, 1)
+
+        display.draw()
+
+        sleep(0.02)
+
+
+# ---------------------------------------------------------
+# STARTUP
+# ---------------------------------------------------------
+
+while True:
+    warte_auf_start()
+    starte_client_game()
+
