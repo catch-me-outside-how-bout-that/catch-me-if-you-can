@@ -1,0 +1,82 @@
+from time import sleep 
+from machine import I2C, Pin
+from ht16k33 import HT16K33Matrix
+import random
+import network
+import espnow
+
+#----ESP-NOW----
+###SLAVE_MAC = b'\x94\xb5\x55\xXX\xXX\xXX'   # ← MAC vom anderen Gerät eintragen
+
+wlan = WLAN(STA_IF)
+wlan.active(True)
+e = espnow.ESPNow()
+e.active(True)
+###e.add_peer(SLAVE_MAC)
+
+#----Display initialisieren----
+display = HT16K33Matrix(I2C(0)) 
+display.set_angle(180) 
+
+#----Maps----
+map1 = b"\x00\x66\x42\x58\x0b\x20\x6e\x00"
+map2 = b"\x00\x6e\x42\x10\x70\x06\x22\x30"
+map3 = b"\x10\x18\x4a\x63\x32\x00\x2c\x20"
+map4 = b"\x00\x46\x6c\x20\x22\x0a\x7a\x00"
+maps = [map1, map2, map3, map4]
+
+#----Startpunkt----
+P1_START_X, P1_START_Y = 0, 0    # links oben
+P2_START_X, P2_START_Y = 7, 7    # rechts unten
+
+p1_x, p1_y = P1_START_X, P1_START_Y
+p2_x, p2_y = P2_START_X, P2_START_Y
+
+#----Funktionen----
+def zufaelliger_spieler():
+  if random.random() < 0.5:
+    meine_rolle = "Faenger"
+    gegner_rolle = "Wegrenner"
+  else:
+    meine_rolle = "Wegrenner"
+    gegner_rolle = "Faenger"
+    
+  ###e.send(SLAVE_MAC, "ROLLE:" + gegner_rolle)
+  return meine_rolle
+
+def zufaellige_map():
+  gewaelte_map = random.choice(maps)
+  ###e.send(SLAVE_MAC, "MAP:" + gewaelte_map.hex())
+  return gewaelte_map
+
+def zeige_startsequenz(meine_rolle):
+  display.clear()
+  display.scroll_text(f"Du bist: {meine_rolle}")
+  sleep(1)
+  display.scroll_text("Timer: 2.00 min")
+  sleep(1)
+
+
+#----Hauptprogramm----
+def main():
+  meine_rolle = zufaelliger_spieler()
+  spiel_map = zufaellige_map()
+
+  zeige_startsequenz(meine_rolle)
+
+  display.set_icon(spiel_map).draw()
+
+  display.set_pixel(p1_x, p1_y, 1)   # 1 = an
+  display.set_pixel(p2_x, p2_y, 1)
+
+main()
+  
+#Prüfen ob Position eine Wand ist (1) oder frei (0) -> Bit 0 = linke Spalte
+def kollision_wand(map_bytes,x,y):
+  if x < 0 or x > 7 or y < 0 or y > 7: #definiert wo Spielrand ist
+    return True
+
+  byte_index = y # Zeile 0 = Byte 0, Zeile 1 = Byte 1,...
+  bit_mask = 1 << (7-x) # Bit 0 = Spalte 7, Bit 7 = Spalte 0
+
+  return (map_bytes[byte_index] & bit_mask) != 0
