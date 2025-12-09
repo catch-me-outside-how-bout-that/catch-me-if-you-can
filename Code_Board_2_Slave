@@ -1,8 +1,3 @@
-# ================================
-#   BOARD 2 (SLAVE / CLIENT)
-#   Fangis Game ESP-NOW
-# ================================
-
 from time import sleep, time
 from machine import I2C, Pin, ADC
 from ht16k33 import HT16K33Matrix
@@ -13,31 +8,24 @@ import ujson
 def jetzt_ms():
     return int(time() * 1000)
 
-
-# =========================================
-#   HARDWARE
-# =========================================
-
-# Joystick
+# ---- Joystick ----
 vrx = ADC(Pin(3), atten=ADC.ATTN_11DB)
 vry = ADC(Pin(4), atten=ADC.ATTN_11DB)
 
 CENTER_X = 1940
 CENTER_Y = 1895
 DEADZONE = 200
-
 MOVE_DELAY_MS = 120
-SPEED_BOOST_DELAY_MS = 70
 
-# Display
+# ---- Display ----
 display = HT16K33Matrix(I2C(0))
 display.set_angle(270)
 
-# Buttons
+# ---- Buttons ----
 button_red = Pin("A0", Pin.IN, Pin.PULL_UP)
 button_blue = Pin("A1", Pin.IN, Pin.PULL_UP)
 
-# Maps
+# ---- Maps ----
 maps = [
     b"\x00\x66\x42\x58\x0b\x20\x6e\x00",
     b"\x00\x6e\x42\x10\x70\x06\x22\x30",
@@ -45,17 +33,16 @@ maps = [
     b"\x00\x46\x6c\x20\x22\x0a\x7a\x00"
 ]
 
-
-# =========================================
-#   ESP-NOW
-# =========================================
+# ---------------------------------------------------------
+# ESP-NOW CLIENT SETUP
+# ---------------------------------------------------------
 w = network.WLAN(network.STA_IF)
 w.active(True)
 
 e = espnow.ESPNow()
 e.active(True)
 
-# <-- MAC-Adresse von BOARD 1 (MASTER) hier eintragen!
+# MAC VON BOARD 1 EINTRAGEN!
 peer_mac = b'\xec\xda;a\\\xa4'
 try:
     e.add_peer(peer_mac)
@@ -63,67 +50,78 @@ except Exception as err:
     print("add_peer error:", err)
 
 
-# =========================================
-#   GAME VARIABLEN (GLOBAL)
-# =========================================
-p1_x = 0
-p1_y = 0
-p2_x = 0
-p2_y = 0
+# ---------------------------------------------------------
+# HELFER: Spiral Animation (wie Board 1)
+# ---------------------------------------------------------
+def spiral_close(display):
+    coords = [
+        (0,0),(1,0),(2,0),(3,0),(4,0),(5,0),(6,0),(7,0),
+        (7,1),(7,2),(7,3),(7,4),(7,5),(7,6),(7,7),
+        (6,7),(5,7),(4,7),(3,7),(2,7),(1,7),(0,7),
+        (0,6),(0,5),(0,4),(0,3),(0,2),(0,1),
+        (1,1),(2,1),(3,1),(4,1),(5,1),(6,1),
+        (6,2),(6,3),(6,4),(6,5),(6,6),
+        (5,6),(4,6),(3,6),(2,6),(1,6),
+        (1,5),(1,4),(1,3),(1,2),
+        (2,2),(3,2),(4,2),(5,2),
+        (5,3),(5,4),(5,5),
+        (4,5),(3,5),(2,5),
+        (2,4),(2,3),
+        (3,3),(4,3),
+        (4,4),(3,4)
+    ]
+    for x, y in coords:
+        display.plot(x, y, 1)
+        display.draw()
+        sleep(0.03)
 
-rolle = "Warte..."
-map_index = 0
-karte = maps[0]
 
-remaining_ms = 120000
+# ---------------------------------------------------------
+# HILFSFUNKTIONEN
+# ---------------------------------------------------------
 
-speed_p2 = 0
-invis_p2 = 0
-
-
-# =========================================
-#   HILFSFUNKTIONEN
-# =========================================
-def read_joystick():
+def read_joystick_direction():
     x_raw = vrx.read()
     y_raw = vry.read()
     x_pos = x_raw - CENTER_X
     y_pos = y_raw - CENTER_Y
 
-    dx = 0
-    dy = 0
+    if abs(x_pos) < DEADZONE and abs(y_pos) < DEADZONE:
+        return None
 
-    if abs(x_pos) > DEADZONE:
-        dx = 1 if x_pos > 0 else -1
-
-    if abs(y_pos) > DEADZONE:
-        dy = 1 if y_pos > 0 else -1
-
-    return dx, dy
+    if abs(x_pos) > abs(y_pos):
+        return "RIGHT" if x_pos > 0 else "LEFT"
+    return "DOWN" if y_pos > 0 else "UP"
 
 
-def kollision_wand(x, y, map_bytes):
-    if x < 0 or x > 7 or y < 0 or y > 7:
-        return True
-    log_x = 7 - y
-    log_y = x
-    bit_mask = 1 << (7 - log_x)
-    return (map_bytes[log_y] & bit_mask) != 0
+# ---------------------------------------------------------
+# SPIEL-STATE CLIENT
+# ---------------------------------------------------------
+
+rolle = "Warte..."
+map_index = 0
+karte = maps[0]
+
+p1_x = p1_y = 0
+p2_x = p2_y = 0
+remaining_ms = 120000
 
 
-# =========================================
-#   WARTEN AUF START-PAKET
-# =========================================
+# ---------------------------------------------------------
+# STARTSCREEN
+# ---------------------------------------------------------
+
 def warte_auf_start():
     global rolle, map_index, karte
 
     display.clear()
     display.scroll_text("Warte auf Start")
-    sleep(0.4)
+    sleep(0.3)
 
     while True:
         recv = e.recv()
         if not recv:
+            sleep(0.05)
             continue
 
         mac, msg = recv
@@ -143,74 +141,83 @@ def warte_auf_start():
             display.clear()
             display.scroll_text(f"Du bist: {rolle}")
             sleep(0.5)
+            display.clear()
             return
 
 
-# =========================================
-#   SPIEL LOOP (CLIENT)
-# =========================================
+# ---------------------------------------------------------
+# MAIN GAME LOOP
+# ---------------------------------------------------------
+
 def starte_client_game():
-    global p1_x, p1_y, p2_x, p2_y
-    global speed_p2, invis_p2, remaining_ms
+    global p1_x, p1_y, p2_x, p2_y, rolle, map_index, karte, remaining_ms
 
     while True:
 
-        # ----------------------------------
-        # SEND INPUT ZUM MASTER
-        # ----------------------------------
-        dx, dy = read_joystick()
+        # --- Eingaben senden ---
+        dir_str = read_joystick_direction()
         red = 1 if button_red.value() == 0 else 0
         blue = 1 if button_blue.value() == 0 else 0
 
-        packet = {"dx": dx, "dy": dy, "red": red, "blue": blue}
-
+        packet = {"type": "input", "dir": dir_str, "red": red, "blue": blue}
         try:
             e.send(peer_mac, ujson.dumps(packet))
         except:
             pass
 
-        # ----------------------------------
-        # EMPFANGE STATE VOM MASTER
-        # ----------------------------------
+        # --- Pakete vom Master empfangen ---
         recv = e.recv()
         if recv:
             mac, msg = recv
+            if msg:
+                try:
+                    data = ujson.loads(msg.decode())
+                except:
+                    data = {}
 
-            try:
-                data = ujson.loads(msg.decode())
-            except:
-                data = {}
+                # ---------- STATE UPDATE ----------
+                if data.get("type") == "state":
+                    p1_x = data["p1_x"]
+                    p1_y = data["p1_y"]
+                    p2_x = data["p2_x"]
+                    p2_y = data["p2_y"]
+                    rolle = data["role_for_peer"]
+                    map_index = data["map_index"]
+                    karte = maps[map_index]
+                    remaining_ms = data["remaining_ms"]
 
-            if data.get("type") == "state":
-                p1_x = data["p1_x"]
-                p1_y = data["p1_y"]
-                p2_x = data["p2_x"]
-                p2_y = data["p2_y"]
-                rolle = data["role_for_peer"]
-                map_index = data["map_index"]
-                karte = maps[map_index]
-                remaining_ms = data["remaining_ms"]
+                # ---------- GAME OVER ----------
+                if data.get("type") == "game_over":
 
-        # ----------------------------------
-        # DISPLAY RENDERING
-        # ----------------------------------
+                    display.clear()
+                    sleep(0.1)
+
+                    # Dieselbe Animation wie Board 1
+                    spiral_close(display)
+
+                    # Text anzeigen
+                    if data.get("won"):
+                        display.scroll_text("Gewonnen!")
+                    else:
+                        display.scroll_text("Verloren")
+
+                    sleep(1.0)
+                    return   # zurück in Warte-Menü
+
+        # --- Render Frame ---
         display.clear()
         display.set_icon(karte).draw()
-
-        # Player 1 (Master)
-        display.plot(p1_x, p1_y, 1)
-
-        # Player 2 (ich)
-        display.plot(p2_x, p2_y, 1)
-
+        display.plot(p1_x, p1_y, 1)  # Spieler 1 (Master)
+        display.plot(p2_x, p2_y, 1)  # Spieler 2 (Client)
         display.draw()
 
         sleep(0.02)
 
 
-# =========================================
-#   STARTUP LOOP
-# =========================================
+# ---------------------------------------------------------
+# PROGRAM FLOW
+# ---------------------------------------------------------
+
 while True:
     warte_auf_start()
     starte_client_game()
