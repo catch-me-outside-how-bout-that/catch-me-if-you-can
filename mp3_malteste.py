@@ -2,28 +2,54 @@ from time import sleep, time
 from machine import I2C, Pin, ADC, UART
 from ht16k33 import HT16K33Matrix
 import random
-from dfplayer import DFPlayer
+import network
+import espnow
+import ujson
+
+# --------------------------------------------
+# DFPLAYER (UART0 → Pins "TX" / "RX")
+# --------------------------------------------
+from dfplayer import DFPlayer   # dozenten-version
+uart = UART(0, tx=Pin("TX"), rx=Pin("RX"))
+mp3 = DFPlayer(uart)
+mp3.volume = 30   # 0–30
+
 
 def jetzt_ms():
     return int(time() * 1000)
 
-GAME_DURATION_MS = 120000  # 2 Minuten
 
-# Joystick
+# ---- SPIEL-DAUER ----
+GAME_DURATION_MS = 120000   # 2 Minuten
+
+
+# ---- Joystick ----
 vrx = ADC(Pin(3), atten=ADC.ATTN_11DB)
 vry = ADC(Pin(4), atten=ADC.ATTN_11DB)
 
-CENTER_X = 1940
-CENTER_Y = 1895
-DEADZONE = 200
+# ---- JOYSTICK AUTOKALIBRATION ----
+sleep(0.5)
+samples_x = []
+samples_y = []
+for _ in range(20):
+    samples_x.append(vrx.read())
+    samples_y.append(vry.read())
+    sleep(0.02)
+
+CENTER_X = sum(samples_x) // len(samples_x)
+CENTER_Y = sum(samples_y) // len(samples_y)
+
+DEADZONE = 150
 MOVE_DELAY_MS = 120
 SPEED_BOOST_DELAY_MS = 70
 
-# HT16K33 Display
+
+#----Display----
 display = HT16K33Matrix(I2C(0))
 display.set_angle(270)
 
-# Spielfeld-Maps
+
+#----Maps----
 maps = [
     b"\x00\x66\x42\x58\x0b\x20\x6e\x00",
     b"\x00\x6e\x42\x10\x70\x06\x22\x30",
@@ -31,33 +57,63 @@ maps = [
     b"\x00\x46\x6c\x20\x22\x0a\x7a\x00"
 ]
 
-# Buttons
+
+#----Buttons----
 button_red = Pin("A0", Pin.IN, Pin.PULL_UP)
 button_blue = Pin("A1", Pin.IN, Pin.PULL_UP)
 
-# DFPLAYER → UART0 über GROVE-Port
-uart = UART(0, tx=Pin("TX"), rx=Pin("RX"))
-mp3 = DFPlayer(uart)
-mp3.volume = 25  # Lautstärke 0–100
+
+# ---------------------------------------------------------
+# ESP-NOW SETUP (MASTER)
+# ---------------------------------------------------------
+w = network.WLAN(network.STA_IF)
+w.active(True)
+
+e = espnow.ESPNow()
+e.active(True)
+
+# MAC-ADRESSE DES SLAVE
+peer_mac = b'H\xcaC/\x08\x14'
+try:
+    e.add_peer(peer_mac)
+except Exception as err:
+    print("add_peer:", err)
+
+p2_dir = None
+p2_red = 0
+p2_blue = 0
 
 
 # ---------------------------------------------------------
-# Funktionen
+# HILFSFUNKTIONEN
 # ---------------------------------------------------------
+def zufaelliger_spieler():
+    return "Faenger" if random.random() < 0.5 else "Wegrenner"
+
+def zufaellige_map_index():
+    return random.randrange(len(maps))
+
+def zeige_startsequenz(rolle):
+    display.clear()
+    display.scroll_text(f"Du bist: {rolle}")
+    sleep(0.6)
+    display.scroll_text("Timer: 2.00min")
+    sleep(0.4)
+    display.clear()
+
 
 def kollision_wand(x, y, map_bytes):
     if x < 0 or x > 7 or y < 0 or y > 7:
         return True
-    phys_x = x
-    phys_y = y
-    byte = map_bytes[phys_y]
-    bit = 1 << (7 - phys_x)
-    return (byte & bit) != 0
+    log_x = 7 - y
+    log_y = x
+    bit_mask = 1 << (7 - log_x)
+    return (map_bytes[log_y] & bit_mask) != 0
+
 
 def read_joystick_direction():
     x_raw = vrx.read()
     y_raw = vry.read()
-
     x_pos = x_raw - CENTER_X
     y_pos = y_raw - CENTER_Y
 
@@ -66,32 +122,32 @@ def read_joystick_direction():
 
     if abs(x_pos) > abs(y_pos):
         return "RIGHT" if x_pos > 0 else "LEFT"
-    return "DOWN" if y_pos > 0 else "UP"
+    else:
+        return "DOWN" if y_pos > 0 else "UP"
+
 
 def spiral_close(display):
-    coords = []
-    x0, y0, x1, y1 = 0, 0, 7, 7
-    while x0 <= x1 and y0 <= y1:
-        for x in range(x0, x1+1):
-            coords.append((x, y0))
-        for y in range(y0+1, y1+1):
-            coords.append((x1, y))
-        if y0 != y1:
-            for x in range(x1-1, x0-1, -1):
-                coords.append((x, y1))
-        if x0 != x1:
-            for y in range(y1-1, y0, -1):
-                coords.append((x0, y))
-
-        x0 += 1
-        y0 += 1
-        x1 -= 1
-        y1 -= 1
-
+    coords = [
+        (0,0),(1,0),(2,0),(3,0),(4,0),(5,0),(6,0),(7,0),
+        (7,1),(7,2),(7,3),(7,4),(7,5),(7,6),(7,7),
+        (6,7),(5,7),(4,7),(3,7),(2,7),(1,7),(0,7),
+        (0,6),(0,5),(0,4),(0,3),(0,2),(0,1),
+        (1,1),(2,1),(3,1),(4,1),(5,1),(6,1),
+        (6,2),(6,3),(6,4),(6,5),(6,6),
+        (5,6),(4,6),(3,6),(2,6),(1,6),
+        (1,5),(1,4),(1,3),(1,2),
+        (2,2),(3,2),(4,2),(5,2),
+        (5,3),(5,4),(5,5),
+        (4,5),(3,5),(2,5),
+        (2,4),(2,3),
+        (3,3),(4,3),
+        (4,4),(3,4)
+    ]
     for x, y in coords:
         display.plot(x, y, 1)
         display.draw()
         sleep(0.03)
+
 
 def zeige_ergebnis(rolle, gefangen):
     display.clear()
@@ -103,10 +159,14 @@ def zeige_ergebnis(rolle, gefangen):
     display.scroll_text(text)
     sleep(0.8)
 
+
 def warte_auf_restart():
     display.clear()
     display.scroll_text("Beide Tasten")
+    sleep(0.2)
     display.scroll_text("3s halten")
+    sleep(0.2)
+
     timer = 0
     while True:
         if button_red.value() == 0 and button_blue.value() == 0:
@@ -120,82 +180,201 @@ def warte_auf_restart():
 
 
 # ---------------------------------------------------------
-# Hauptspiel
+# ESP-NOW INPUT (SLAVE → MASTER)
 # ---------------------------------------------------------
+def handle_incoming():
+    global p2_dir, p2_red, p2_blue
+    try:
+        mac, msg = e.recv(0)
+    except OSError:
+        return
+    if not msg:
+        return
+    try:
+        data = ujson.loads(msg.decode())
+    except:
+        return
 
+    if data.get("type") == "input":
+        p2_dir = data.get("dir", None)
+        p2_red = data.get("red", 0)
+        p2_blue = data.get("blue", 0)
+
+
+# ---------------------------------------------------------
+# SEND STATE TO SLAVE
+# ---------------------------------------------------------
+def send_state(p1_x, p1_y, p2_x, p2_y, rolle, map_index, remaining_ms):
+    payload = {
+        "type": "state",
+        "p1_x": p1_x,
+        "p1_y": p1_y,
+        "p2_x": p2_x,
+        "p2_y": p2_y,
+        "role_for_peer": "Faenger" if rolle == "Wegrenner" else "Wegrenner",
+        "map_index": map_index,
+        "remaining_ms": remaining_ms
+    }
+    try:
+        e.send(peer_mac, ujson.dumps(payload))
+    except:
+        pass
+
+
+def send_start(map_index, rolle_peer):
+    payload = {
+        "type": "start",
+        "role_for_peer": rolle_peer,
+        "map_index": map_index,
+        "start_ts": jetzt_ms()
+    }
+    try:
+        e.send(peer_mac, ujson.dumps(payload))
+    except:
+        pass
+
+
+# ---------------------------------------------------------
+# HAUPT-SPIEL
+# ---------------------------------------------------------
 def starte_spiel():
-    global last_move_ms
+    global p2_dir
 
-    # Hintergrundmusik starten
+    # ----------------------------------------
+    # 🔊 1. Hintergrundmusik starten
+    # ----------------------------------------
     mp3.pause()
-    sleep(0.1)
-    mp3.play_track(1, 1)   # Track 1 im Ordner 01
-    last_move_ms = 0
+    sleep(0.2)
+    mp3.play_track(1, 1)   # Track 1 = Hintergrundmusik
 
     p1_x, p1_y = 7, 7
     p2_x, p2_y = 0, 0
 
-    karte = random.choice(maps)
+    rolle = zufaelliger_spieler()
+    map_index = zufaellige_map_index()
+    karte = maps[map_index]
 
-    used_red = used_blue = 0
-    last_red = last_blue = 1
-    invis = speed = 0
+    used_red = 0
+    used_blue = 0
+    last_red = 1
+    last_blue = 1
+    invis = 0
+    speed = 0
+
+    p2_dir = None
+    last_move_p1 = 0
+    last_move_p2 = 0
+
+    zeige_startsequenz(rolle)
+
+    rolle_peer = "Faenger" if rolle == "Wegrenner" else "Wegrenner"
+    send_start(map_index, rolle_peer)
 
     game_start = jetzt_ms()
+    last_state_send = 0
 
     while True:
         jetzt = jetzt_ms()
 
-        # Timeout = Game Over
+        # ----------------------------------------
+        # ⏳ TIMEOUT
+        # ----------------------------------------
         if jetzt - game_start >= GAME_DURATION_MS:
+
             mp3.pause()
-            sleep(0.1)
-            mp3.play_track(1, 2)  # Track 2 - GameOver
+            sleep(0.2)
+            mp3.play_track(1, 2)   # Game Over Sound
+
+            won = False if rolle == "Faenger" else True
+            e.send(peer_mac, ujson.dumps({"type": "game_over", "won": won}))
+
             spiral_close(display)
-            zeige_ergebnis("Wegrenner", gefangen=False)
+            zeige_ergebnis(rolle, gefangen=False)
             return
 
-        # Buttons
+        remaining = GAME_DURATION_MS - (jetzt - game_start)
+
+        handle_incoming()
+
+        # POWERUPS
         red = button_red.value()
         blue = button_blue.value()
 
         if last_red == 1 and red == 0 and used_red < 2:
-            invis = jetzt + 3000
             used_red += 1
+            invis = jetzt + 3000
 
         if last_blue == 1 and blue == 0 and used_blue < 2:
-            speed = jetzt + 3000
             used_blue += 1
+            speed = jetzt + 3000
 
         last_red = red
         last_blue = blue
 
-        # Bewegung
-        delay = SPEED_BOOST_DELAY_MS if jetzt < speed else MOVE_DELAY_MS
-        richtung = read_joystick_direction()
+        # ----------------------------------------
+        # BEWEGUNG P1
+        # ----------------------------------------
+        delay_p1 = SPEED_BOOST_DELAY_MS if jetzt < speed else MOVE_DELAY_MS
+        richtung_p1 = read_joystick_direction()
 
-        if richtung and (jetzt - last_move_ms) >= delay:
+        if richtung_p1 and (jetzt - last_move_p1) >= delay_p1:
             nx, ny = p1_x, p1_y
 
-            if richtung == "UP": ny -= 1
-            elif richtung == "DOWN": ny += 1
-            elif richtung == "LEFT": nx -= 1
-            elif richtung == "RIGHT": nx += 1
+            if richtung_p1 == "UP": ny -= 1
+            if richtung_p1 == "DOWN": ny += 1
+            if richtung_p1 == "LEFT": nx -= 1
+            if richtung_p1 == "RIGHT": nx += 1
 
             if not kollision_wand(nx, ny, karte):
                 p1_x, p1_y = nx, ny
-            last_move_ms = jetzt
 
-        # Fang?
+                # SpeedBoost zweiter Schritt
+                if jetzt < speed:
+                    nx2, ny2 = p1_x, p1_y
+                    if richtung_p1 == "UP": ny2 -= 1
+                    if richtung_p1 == "DOWN": ny2 += 1
+                    if richtung_p1 == "LEFT": nx2 -= 1
+                    if richtung_p1 == "RIGHT": nx2 += 1
+                    if not kollision_wand(nx2, ny2, karte):
+                        p1_x, p1_y = nx2, ny2
+
+            last_move_p1 = jetzt
+
+        # ----------------------------------------
+        # BEWEGUNG P2
+        # ----------------------------------------
+        if p2_dir and (jetzt - last_move_p2) >= MOVE_DELAY_MS:
+            nx2, ny2 = p2_x, p2_y
+
+            if p2_dir == "UP": ny2 -= 1
+            if p2_dir == "DOWN": ny2 += 1
+            if p2_dir == "LEFT": nx2 -= 1
+            if p2_dir == "RIGHT": nx2 += 1
+
+            if not kollision_wand(nx2, ny2, karte):
+                p2_x, p2_y = nx2, ny2
+
+            last_move_p2 = jetzt
+
+        # ----------------------------------------
+        # 🎯 FANG?
+        # ----------------------------------------
         if p1_x == p2_x and p1_y == p2_y:
+
             mp3.pause()
-            sleep(0.1)
+            sleep(0.2)
             mp3.play_track(1, 2)
+
+            won = True if rolle == "Faenger" else False
+            e.send(peer_mac, ujson.dumps({"type":"game_over","won":won}))
+
             spiral_close(display)
-            zeige_ergebnis("Faenger", gefangen=True)
+            zeige_ergebnis(rolle, gefangen=True)
             return
 
-        # Render
+        # ----------------------------------------
+        # RENDER
+        # ----------------------------------------
         display.clear()
         display.set_icon(karte).draw()
         display.plot(p2_x, p2_y, 1)
@@ -204,13 +383,21 @@ def starte_spiel():
             display.plot(p1_x, p1_y, 1)
 
         display.draw()
+
+        # ----------------------------------------
+        # STATE AN SLAVE SENDEN
+        # ----------------------------------------
+        if jetzt - last_state_send >= 150:
+            send_state(p1_x, p1_y, p2_x, p2_y, rolle, map_index, remaining)
+            last_state_send = jetzt
+
         sleep(0.02)
 
 
-# ---------------------------------------------------------
-# Loop
-# ---------------------------------------------------------
 
+# ---------------------------------------------------------
+# ENDLOSER GAME LOOP
+# ---------------------------------------------------------
 while True:
     starte_spiel()
     warte_auf_restart()
