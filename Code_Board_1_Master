@@ -1,4 +1,3 @@
-# board1_game_with_espnow.py  (Master / Game-ESP32)
 from time import sleep, time
 from machine import I2C, Pin, ADC
 from ht16k33 import HT16K33Matrix
@@ -13,14 +12,25 @@ def jetzt_ms():
 # ---- SPIEL-DAUER ----
 GAME_DURATION_MS = 120000   # 2 Minuten
 
-# ---- Joystick (nur lokal für Player1)----
+# ---- Joystick (lokaler Spieler P1) ----
 vrx = ADC(Pin(3), atten=ADC.ATTN_11DB)
 vry = ADC(Pin(4), atten=ADC.ATTN_11DB)
 
-CENTER_X = 1940
-CENTER_Y = 1895
+# ---- JOYSTICK AUTOKALIBRATION ----
+sleep(0.5)
+samples_x = []
+samples_y = []
+for _ in range(20):
+    samples_x.append(vrx.read())
+    samples_y.append(vry.read())
+    sleep(0.02)
 
-DEADZONE = 200
+CENTER_X = sum(samples_x) // len(samples_x)
+CENTER_Y = sum(samples_y) // len(samples_y)
+
+DEADZONE = 150
+print("CENTER_X:", CENTER_X, "CENTER_Y:", CENTER_Y)
+
 MOVE_DELAY_MS = 120
 SPEED_BOOST_DELAY_MS = 70
 
@@ -41,7 +51,7 @@ button_red = Pin("A0", Pin.IN, Pin.PULL_UP)
 button_blue = Pin("A1", Pin.IN, Pin.PULL_UP)
 
 # ---------------------------------------------------------
-# ESP-NOW Setup (MASTER)
+# ESP-NOW SETUP (MASTER)
 # ---------------------------------------------------------
 w = network.WLAN(network.STA_IF)
 w.active(True)
@@ -49,18 +59,22 @@ w.active(True)
 e = espnow.ESPNow()
 e.active(True)
 
-# <-- TRAGE HIER DIE MAC-ADRESSE VON BOARD 2 (PEER) EIN !!!
-# Beispiel: peer_mac = b'\xac\x67\xb2\x1f"\x81'
-peer_mac = b'H\xcaC/\x08\x14'  # <-- ERSETZT
+# HIER: MAC-ADRESSE VON BOARD 2 EINTRAGEN!
+peer_mac = b'H\xcaC/\x08\x14'
 try:
     e.add_peer(peer_mac)
 except Exception as err:
-    # falls noch nicht erreichbar - add_peer kann fehlschlagen, handle still
     print("add_peer:", err)
 
+# Empfangspuffer für Board-2-Input
+p2_dir = None
+p2_red = 0
+p2_blue = 0
+
 # ---------------------------------------------------------
-# Hilfsfunktionen aus deinem Code (leicht angepasst)
+# HILFSFUNKTIONEN
 # ---------------------------------------------------------
+
 def zufaelliger_spieler():
     return "Faenger" if random.random() < 0.5 else "Wegrenner"
 
@@ -72,7 +86,8 @@ def zeige_startsequenz(meine_rolle):
     display.scroll_text(f"Du bist: {meine_rolle}")
     sleep(0.6)
     display.scroll_text("Timer: 2.00min")
-    sleep(0.6)
+    sleep(0.5)
+    display.clear()
 
 def kollision_wand(x, y, map_bytes):
     if x < 0 or x > 7 or y < 0 or y > 7:
@@ -87,13 +102,16 @@ def read_joystick_direction():
     y_raw = vry.read()
     x_pos = x_raw - CENTER_X
     y_pos = y_raw - CENTER_Y
+
     if abs(x_pos) < DEADZONE and abs(y_pos) < DEADZONE:
         return None
+
     if abs(x_pos) > abs(y_pos):
         return "RIGHT" if x_pos > 0 else "LEFT"
-    return "DOWN" if y_pos > 0 else "UP"
+    else:
+        return "DOWN" if y_pos > 0 else "UP"
 
-# ---- Spiral Animation ---- (unchanged)
+# ---- Spiral Animation ----
 def spiral_close(display):
     coords = [
         (0,0),(1,0),(2,0),(3,0),(4,0),(5,0),(6,0),(7,0),
@@ -132,6 +150,7 @@ def warte_auf_restart():
     sleep(0.2)
     display.scroll_text("3s halten")
     sleep(0.2)
+
     timer = 0
     while True:
         if button_red.value() == 0 and button_blue.value() == 0:
@@ -144,47 +163,30 @@ def warte_auf_restart():
         sleep(0.05)
 
 # ---------------------------------------------------------
-# ESP-NOW: eingehende Nachrichten verarbeiten
-# Erwartetes Paket vom Peer (Board2): {"dx": -1/0/1, "dy": -1/0/1, "red":0/1, "blue":0/1}
+# ESP-NOW: eingehende INPUTS von Board 2
 # ---------------------------------------------------------
-# Zustand/Timer für Player2 (auf MASTER)
-last_move_ms_p1 = 0
-last_move_ms_p2 = 0
-used_red_p1 = used_blue_p1 = 0
-used_red_p2 = used_blue_p2 = 0
-invis_p1 = 0
-speed_p1 = 0
-invis_p2 = 0
-speed_p2 = 0
-
-# Empfangspuffer für letzten Input von Peer
-peer_input = {"dx":0,"dy":0,"red":0,"blue":0, "ts":0}
-
 def handle_incoming():
-    """
-    Call often in the main loop — non-blocking check for incoming ESP-NOW packets.
-    """
-    global peer_input
-    # e.recv() returns (mac, msg) when a message is present
-    recv = e.recv()
-    if not recv:
+    global p2_dir, p2_red, p2_blue
+    try:
+        mac, msg = e.recv(0)   # 0 = non-blocking
+    except OSError:
+        return
+    if not msg:
         return
     try:
-        host, msg = recv
-        if not msg:
-            return
-        # msg is bytes, decode and parse JSON
         data = ujson.loads(msg.decode())
-        # store the last input with timestamp
-        data["ts"] = jetzt_ms()
-        peer_input = data
-    except Exception as err:
-        print("espnow recv error:", err)
+    except:
+        return
 
+    if data.get("type") == "input":
+        p2_dir = data.get("dir", None)
+        p2_red = data.get("red", 0)
+        p2_blue = data.get("blue", 0)
+
+# ---------------------------------------------------------
+# ESP-NOW: State an Board 2
+# ---------------------------------------------------------
 def send_state(p1_x, p1_y, p2_x, p2_y, rolle, map_index, remaining_ms):
-    """
-    send the authoritative state to the peer so it can render locally.
-    """
     payload = {
         "type": "state",
         "p1_x": p1_x,
@@ -197,28 +199,27 @@ def send_state(p1_x, p1_y, p2_x, p2_y, rolle, map_index, remaining_ms):
     }
     try:
         e.send(peer_mac, ujson.dumps(payload))
-    except Exception as err:
-        # Peer not reachable / not added yet - ignore
-        # print("espnow send error:", err)
+    except:
         pass
 
-def send_start(map_index, role_for_peer):
-    payload = {"type":"start", "role_for_peer": role_for_peer, "map_index": map_index, "start_ts": jetzt_ms()}
+def send_start(map_index, rolle_fuer_peer):
+    payload = {
+        "type": "start",
+        "role_for_peer": rolle_fuer_peer,
+        "map_index": map_index,
+        "start_ts": jetzt_ms()
+    }
     try:
         e.send(peer_mac, ujson.dumps(payload))
-    except Exception:
+    except:
         pass
 
 # ---------------------------------------------------------
-# HAUPT-SPIEL-FUNKTION (angepasst: behandelt p2 Input vom Peer)
+# HAUPT-SPIEL-FUNKTION (mit P2 über ESP-NOW)
 # ---------------------------------------------------------
-def starte_spiel():
-    global last_move_ms_p1, last_move_ms_p2
-    global used_red_p1, used_blue_p1, used_red_p2, used_blue_p2
-    global invis_p1, invis_p2, speed_p1, speed_p2
 
-    last_move_ms_p1 = 0
-    last_move_ms_p2 = 0
+def starte_spiel():
+    global p2_dir
 
     # Spieler Start
     p1_x, p1_y = 7, 7
@@ -228,22 +229,23 @@ def starte_spiel():
     map_index = zufaellige_map_index()
     karte = maps[map_index]
 
-    # Powerup
-    used_red_p1 = 0
-    used_blue_p1 = 0
-    used_red_p2 = 0
-    used_blue_p2 = 0
-    invis_p1 = 0
-    invis_p2 = 0
-    speed_p1 = 0
-    speed_p2 = 0
+    # Powerup (nur für P1)
+    used_red = 0
+    used_blue = 0
+    last_red = 1
+    last_blue = 1
+    invis = 0
+    speed = 0
+
+    p2_dir = None
+    last_move_p1 = 0
+    last_move_p2 = 0
 
     zeige_startsequenz(rolle)
 
-    # Sende Start-Paket an Peer (teilt Map und Rolle für Peer mit)
-    # rolle_for_peer = rolle inverted: if I am Faenger, peer is Wegrenner
-    rolle_for_peer = "Faenger" if rolle == "Wegrenner" else "Wegrenner"
-    send_start(map_index, rolle_for_peer)
+    # Infos an Board 2 schicken
+    rolle_fuer_peer = "Faenger" if rolle == "Wegrenner" else "Wegrenner"
+    send_start(map_index, rolle_fuer_peer)
 
     game_start = jetzt_ms()
     last_state_send = 0
@@ -254,145 +256,109 @@ def starte_spiel():
     while True:
         jetzt = jetzt_ms()
 
-        # TIMER
-        remaining = max(0, GAME_DURATION_MS - (jetzt - game_start))
+        # TIMER abgelaufen?  SEND GAME OVER
         if jetzt - game_start >= GAME_DURATION_MS:
+
+            won = False if rolle == "Faenger" else True
+            game_over_packet = {"type": "game_over", "won": won}
+            e.send(peer_mac, ujson.dumps(game_over_packet))
+
             spiral_close(display)
             zeige_ergebnis(rolle, gefangen=False)
             return
 
-        # ----- Handle incoming ESP-NOW packets (peer input) -----
+        remaining = GAME_DURATION_MS - (jetzt - game_start)
+
+        # INPUT von Board 2
         handle_incoming()
 
-        # BUTTONS (local P1)
+        # BUTTONS P1 (Powerups)
         red = button_red.value()
         blue = button_blue.value()
 
-        if used_red_p1 is None:
-            used_red_p1 = 0
-        if used_blue_p1 is None:
-            used_blue_p1 = 0
+        if last_red == 1 and red == 0 and used_red < 2:
+            used_red += 1
+            invis = jetzt + 3000
 
-        # detect rising edge (pressed = 0)
-        # local P1 button logic
-        if red == 0 and used_red_p1 < 2 and hasattr(starte_spiel, "__pressed_last_red_p1") == False:
-            pass  # handled below with edge detection
-        # We implement edge detection with last values stored as attributes
-        if not hasattr(starte_spiel, "__last_red_p1"):
-            starte_spiel.__last_red_p1 = 1
-            starte_spiel.__last_blue_p1 = 1
+        if last_blue == 1 and blue == 0 and used_blue < 2:
+            used_blue += 1
+            speed = jetzt + 3000
 
-        if starte_spiel.__last_red_p1 == 1 and red == 0 and used_red_p1 < 2:
-            used_red_p1 += 1
-            invis_p1 = jetzt + 3000
+        last_red = red
+        last_blue = blue
 
-        if starte_spiel.__last_blue_p1 == 1 and blue == 0 and used_blue_p1 < 2:
-            used_blue_p1 += 1
-            speed_p1 = jetzt + 3000
+        # Bewegung P1
+        delay_p1 = SPEED_BOOST_DELAY_MS if jetzt < speed else MOVE_DELAY_MS
+        richtung_p1 = read_joystick_direction()
 
-        starte_spiel.__last_red_p1 = red
-        starte_spiel.__last_blue_p1 = blue
-
-        # ----- Peer button/input handling -> update p2 state -----
-        # peer_input contains last known dx,dy,red,blue,ts
-        if peer_input and peer_input.get("ts", 0) > 0:
-            # edge detection for peer buttons (simple)
-            # For used counters and timers for p2 we track last states
-            if not hasattr(starte_spiel, "__last_red_p2"):
-                starte_spiel.__last_red_p2 = 1
-                starte_spiel.__last_blue_p2 = 1
-
-            px = peer_input.get("dx", 0)
-            py = peer_input.get("dy", 0)
-            # buttons are 1 when pressed in sender convention
-            red_p = peer_input.get("red", 0)
-            blue_p = peer_input.get("blue", 0)
-
-            # button edge
-            if starte_spiel.__last_red_p2 == 0 and red_p == 1 and used_red_p2 < 2:
-                # (case where sender uses different convention) - try both:
-                used_red_p2 += 1
-                invis_p2 = jetzt + 3000
-            # handle if sender reports 1 while pressed:
-            if starte_spiel.__last_red_p2 == 1 and red_p == 1 and used_red_p2 < 2:
-                # this means sender uses 1==pressed; only trigger on transition 0->1 if possible
-                # simpler: trigger when value is 1 and not already active (cooldown limit ensures no spam)
-                if invis_p2 < jetzt:
-                    used_red_p2 += 1
-                    invis_p2 = jetzt + 3000
-
-            if starte_spiel.__last_blue_p2 == 0 and blue_p == 1 and used_blue_p2 < 2:
-                used_blue_p2 += 1
-                speed_p2 = jetzt + 3000
-            if starte_spiel.__last_blue_p2 == 1 and blue_p == 1 and used_blue_p2 < 2:
-                if speed_p2 < jetzt:
-                    used_blue_p2 += 1
-                    speed_p2 = jetzt + 3000
-
-            starte_spiel.__last_red_p2 = red_p
-            starte_spiel.__last_blue_p2 = blue_p
-
-            # Bewegung für p2 based on peer dx/dy, obeying move delay and boost delay
-            delay_p2 = SPEED_BOOST_DELAY_MS if jetzt < speed_p2 else MOVE_DELAY_MS
-            if (jetzt - last_move_ms_p2) >= delay_p2:
-                nx2, ny2 = p2_x + px, p2_y + py
-                if not kollision_wand(nx2, ny2, karte):
-                    p2_x, p2_y = nx2, ny2
-                    # if boosted, do second step
-                    if jetzt < speed_p2:
-                        nx22, ny22 = p2_x + px, p2_y + py
-                        if not kollision_wand(nx22, ny22, karte):
-                            p2_x, p2_y = nx22, ny22
-                last_move_ms_p2 = jetzt
-
-        # ----- Bewegung P1 (lokal) -----
-        delay = SPEED_BOOST_DELAY_MS if jetzt < speed_p1 else MOVE_DELAY_MS
-        richtung = read_joystick_direction()
-        if richtung and (jetzt - last_move_ms_p1) >= delay:
+        if richtung_p1 and (jetzt - last_move_p1) >= delay_p1:
             nx, ny = p1_x, p1_y
-            if richtung == "UP": ny -= 1
-            elif richtung == "DOWN": ny += 1
-            elif richtung == "LEFT": nx -= 1
-            elif richtung == "RIGHT": nx += 1
+
+            if richtung_p1 == "UP": ny -= 1
+            elif richtung_p1 == "DOWN": ny += 1
+            elif richtung_p1 == "LEFT": nx -= 1
+            elif richtung_p1 == "RIGHT": nx += 1
+
             if not kollision_wand(nx, ny, karte):
                 p1_x, p1_y = nx, ny
-                if jetzt < speed_p1:
+
+                if jetzt < speed:
                     nx2, ny2 = p1_x, p1_y
-                    if richtung == "UP": ny2 -= 1
-                    elif richtung == "DOWN": ny2 += 1
-                    elif richtung == "LEFT": nx2 -= 1
-                    elif richtung == "RIGHT": nx2 += 1
+                    if richtung_p1 == "UP": ny2 -= 1
+                    elif richtung_p1 == "DOWN": ny2 += 1
+                    elif richtung_p1 == "LEFT": nx2 -= 1
+                    elif richtung_p1 == "RIGHT": nx2 += 1
                     if not kollision_wand(nx2, ny2, karte):
                         p1_x, p1_y = nx2, ny2
-            last_move_ms_p1 = jetzt
 
-        # ----- FANG ? -----
+            last_move_p1 = jetzt
+
+        # Bewegung P2
+        if p2_dir and (jetzt - last_move_p2) >= MOVE_DELAY_MS:
+            nx2, ny2 = p2_x, p2_y
+
+            if p2_dir == "UP": ny2 -= 1
+            elif p2_dir == "DOWN": ny2 += 1
+            elif p2_dir == "LEFT": nx2 -= 1
+            elif p2_dir == "RIGHT": nx2 += 1
+
+            if not kollision_wand(nx2, ny2, karte):
+                p2_x, p2_y = nx2, ny2
+
+            last_move_p2 = jetzt
+
+        # FANG? 🔵 SEND GAME OVER
         if p1_x == p2_x and p1_y == p2_y:
+
+            won = True if rolle == "Faenger" else False
+            game_over_packet = {"type": "game_over", "won": won}
+            e.send(peer_mac, ujson.dumps(game_over_packet))
+
             spiral_close(display)
             zeige_ergebnis(rolle, gefangen=True)
             return
 
-        # ----- Render -----
+        # Render
         display.clear()
         display.set_icon(karte).draw()
-
-        # p2 always visible on display
         display.plot(p2_x, p2_y, 1)
-        # p1 is hidden if invis active
-        if jetzt >= invis_p1:
+
+        if jetzt >= invis:
             display.plot(p1_x, p1_y, 1)
 
         display.draw()
-        sleep(0.02)
 
-        # ----- Periodically send authoritative state to peer -----
+        # State an Board 2 schicken
         if jetzt - last_state_send >= 150:
             send_state(p1_x, p1_y, p2_x, p2_y, rolle, map_index, remaining)
             last_state_send = jetzt
 
+        sleep(0.02)
+
 # ---------------------------------------------------------
 # ENDLOSER GAME-LOOP MIT RESTART
 # ---------------------------------------------------------
+
 while True:
     starte_spiel()
     warte_auf_restart()
