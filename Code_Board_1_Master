@@ -1,6 +1,6 @@
 from time import sleep, time
-from machine import I2C, Pin, ADC
-from ht16k33 import HT16K33Matrix
+from machine import Pin, ADC
+import neopixel
 import random
 import network
 import espnow
@@ -34,9 +34,95 @@ print("CENTER_X:", CENTER_X, "CENTER_Y:", CENTER_Y)
 MOVE_DELAY_MS = 120
 SPEED_BOOST_DELAY_MS = 70
 
-#----Display----
-display = HT16K33Matrix(I2C(0))
-display.set_angle(270)
+# ---------------------------------------------------------
+# NEOPIXEL 8x8 MATRIX
+# ---------------------------------------------------------
+
+class NeoPixelMatrix8x8:
+    def __init__(self, pin_name="D5", width=8, height=8, base_brightness=0.25):
+        self.width = width
+        self.height = height
+        self.base_brightness = base_brightness
+        pin = Pin(pin_name, Pin.OUT)
+        self.np = neopixel.NeoPixel(pin, width * height)
+        self.buffer = [(0, 0, 0)] * (width * height)
+
+    def _index(self, x, y):
+        """
+        Logische Koordinaten:
+        x: 0..7 (links -> rechts)
+        y: 0..7 (oben -> unten)
+
+        Hardware-Layout:
+        - Index 0 unten links
+        - läuft Reihe für Reihe von unten nach oben
+        - jeweils von links nach rechts
+
+        Dadurch ist das Board nicht mehr gespiegelt.
+        """
+        if not (0 <= x < self.width and 0 <= y < self.height):
+            return None
+        row_from_bottom = 7 - y   # y=7 -> row 0 (unten), y=0 -> row 7 (oben)
+        col_from_left = x         # x=0 -> links
+        return row_from_bottom * self.width + col_from_left
+
+    def clear(self):
+        for i in range(self.width * self.height):
+            self.buffer[i] = (0, 0, 0)
+
+    def draw(self):
+        """
+        Schreibt den Buffer auf die Matrix.
+        Limitiert die Gesamthelligkeit so, dass effektiv
+        max. ~15 LEDs auf Vollgas entsprechen.
+        """
+        lit = 0
+        for (r, g, b) in self.buffer:
+            if r or g or b:
+                lit += 1
+
+        scale_lit = 1.0
+        if lit > 15:
+            scale_lit = 15.0 / float(lit)
+
+        for i, (r, g, b) in enumerate(self.buffer):
+            br = self.base_brightness * scale_lit
+            self.np[i] = (int(r * br), int(g * br), int(b * br))
+        self.np.write()
+
+    def plot(self, x, y, val=1, color=(40, 40, 40)):
+        idx = self._index(x, y)
+        if idx is None:
+            return
+        if val:
+            self.buffer[idx] = color
+        else:
+            self.buffer[idx] = (0, 0, 0)
+
+    def set_icon(self, map_bytes, color=(20, 20, 0)):
+        """
+        Zeichnet die Wände analog zu kollision_wand().
+        Darstellung & Kollision stimmen überein.
+        """
+        self.clear()
+        for x in range(8):
+            for y in range(8):
+                if not (0 <= x <= 7 and 0 <= y <= 7):
+                    continue
+                if kollision_wand(x, y, map_bytes):
+                    self.plot(x, y, 1, color)
+        return self
+
+    def fill(self, color):
+        for i in range(self.width * self.height):
+            self.buffer[i] = color
+
+# ---- 5V-Levelshift für G0-Port aktivieren ----
+level_shift = Pin("D4", Pin.OUT)
+level_shift.on()
+
+#----Display (NeoPixel)----
+display = NeoPixelMatrix8x8(pin_name="D5")
 
 #----Maps----
 maps = [
@@ -82,12 +168,46 @@ def zufaellige_map_index():
     return random.randrange(len(maps))
 
 def zeige_startsequenz(meine_rolle):
+    """
+    Ersetzt den Scroll-Text durch eine Rollen-Animation:
+    - Faenger: rotes Schachbrett
+    - Wegrenner: blaues Schachbrett
+    plus kurzer "Timer"-Blink.
+    """
     display.clear()
-    display.scroll_text(f"Du bist: {meine_rolle}")
-    sleep(0.6)
-    display.scroll_text("Timer: 2.00min")
+    # Fänger = blau, Wegrenner = rot
+    color = (0, 0, 80) if meine_rolle == "Faenger" else (80, 0, 0)
+
+    # Schachbrett-Animation
+    for phase in range(4):
+        display.clear()
+        for x in range(8):
+            for y in range(8):
+                if (x + y + phase) % 2 == 0:
+                    display.plot(x, y, 1, color)
+        display.draw()
+        sleep(0.12)
+
+    # Startposition kurz anzeigen
+    display.clear()
+    if meine_rolle == "Faenger":
+        display.plot(7, 7, 1, color)
+    else:
+        display.plot(0, 0, 1, color)
+    display.draw()
     sleep(0.5)
+
+    # kurzes "Timer"-Blink
+    for _ in range(2):
+        display.fill((20, 20, 20))
+        display.draw()
+        sleep(0.15)
+        display.clear()
+        display.draw()
+        sleep(0.15)
+
     display.clear()
+    display.draw()
 
 def kollision_wand(x, y, map_bytes):
     if x < 0 or x > 7 or y < 0 or y > 7:
@@ -112,7 +232,7 @@ def read_joystick_direction():
         return "DOWN" if y_pos > 0 else "UP"
 
 # ---- Spiral Animation ----
-def spiral_close(display):
+def spiral_close(display_obj):
     coords = [
         (0,0),(1,0),(2,0),(3,0),(4,0),(5,0),(6,0),(7,0),
         (7,1),(7,2),(7,3),(7,4),(7,5),(7,6),(7,7),
@@ -129,30 +249,59 @@ def spiral_close(display):
         (3,3),(4,3),
         (4,4),(3,4)
     ]
+    display_obj.clear()
     for x, y in coords:
-        display.plot(x, y, 1)
-        display.draw()
+        display_obj.plot(x, y, 1, color=(0, 40, 0))
+        display_obj.draw()
         sleep(0.03)
 
 def zeige_ergebnis(rolle, gefangen):
-    display.clear()
-    sleep(0.2)
+    """
+    Ersetzt den Text "Gewonnen/Verloren" durch Farb-Blink:
+    - Gewonnen: grün blinkend
+    - Verloren: rot blinkend
+    """
     if rolle == "Wegrenner":
-        text = "Verloren" if gefangen else "Gewonnen!"
+        gewonnen = not gefangen
     else:
-        text = "Gewonnen!" if gefangen else "Verloren"
-    display.scroll_text(text)
-    sleep(0.8)
+        gewonnen = gefangen
+
+    col = (0, 60, 0) if gewonnen else (60, 0, 0)
+
+    display.clear()
+    display.draw()
+    sleep(0.2)
+
+    for _ in range(4):
+        display.fill(col)
+        display.draw()
+        sleep(0.25)
+        display.clear()
+        display.draw()
+        sleep(0.2)
 
 def warte_auf_restart():
-    display.clear()
-    display.scroll_text("Beide Tasten")
-    sleep(0.2)
-    display.scroll_text("3s halten")
-    sleep(0.2)
-
+    """
+    Wartet, bis beide Buttons 3s gehalten werden.
+    Animation: pulsierender Rahmen.
+    """
     timer = 0
+    on = False
+
     while True:
+        on = not on
+        display.clear()
+        if on:
+            col = (8, 8, 8)
+            # Rahmen zeichnen
+            for x in range(8):
+                display.plot(x, 0, 1, col)
+                display.plot(x, 7, 1, col)
+            for y in range(1, 7):
+                display.plot(0, y, 1, col)
+                display.plot(7, y, 1, col)
+        display.draw()
+
         if button_red.value() == 0 and button_blue.value() == 0:
             if timer == 0:
                 timer = jetzt_ms()
@@ -160,7 +309,8 @@ def warte_auf_restart():
                 return
         else:
             timer = 0
-        sleep(0.05)
+
+        sleep(0.2)
 
 # ---------------------------------------------------------
 # ESP-NOW: eingehende INPUTS von Board 2
@@ -178,7 +328,7 @@ def handle_incoming():
     except:
         return
 
-    if data.get("type") == "input":
+    if isinstance(data, dict) and data.get("type") == "input":
         p2_dir = data.get("dir", None)
         p2_red = data.get("red", 0)
         p2_blue = data.get("blue", 0)
@@ -261,7 +411,10 @@ def starte_spiel():
 
             won = False if rolle == "Faenger" else True
             game_over_packet = {"type": "game_over", "won": won}
-            e.send(peer_mac, ujson.dumps(game_over_packet))
+            try:
+                e.send(peer_mac, ujson.dumps(game_over_packet))
+            except:
+                pass
 
             spiral_close(display)
             zeige_ergebnis(rolle, gefangen=False)
@@ -332,19 +485,34 @@ def starte_spiel():
 
             won = True if rolle == "Faenger" else False
             game_over_packet = {"type": "game_over", "won": won}
-            e.send(peer_mac, ujson.dumps(game_over_packet))
+            try:
+                e.send(peer_mac, ujson.dumps(game_over_packet))
+            except:
+                pass
 
             spiral_close(display)
             zeige_ergebnis(rolle, gefangen=True)
             return
 
         # Render
-        display.clear()
-        display.set_icon(karte).draw()
-        display.plot(p2_x, p2_y, 1)
+        display.set_icon(karte, color=(15, 15, 0))  # Wände
 
+        # Spielerfarben: Fänger = blau, Wegrenner = rot
+        if rolle == "Faenger":
+            # P1 ist Fänger, P2 ist Wegrenner
+            p1_color = (0, 0, 60)   # Fänger (du) = blau
+            p2_color = (60, 0, 0)   # Wegrenner = rot
+        else:
+            # P1 ist Wegrenner, P2 ist Fänger
+            p1_color = (60, 0, 0)   # Wegrenner (du) = rot
+            p2_color = (0, 0, 60)   # Fänger = blau
+
+        # P2 immer sichtbar
+        display.plot(p2_x, p2_y, 1, color=p2_color)
+
+        # P1 nur sichtbar, wenn Unsichtbarkeit abgelaufen
         if jetzt >= invis:
-            display.plot(p1_x, p1_y, 1)
+            display.plot(p1_x, p1_y, 1, color=p1_color)
 
         display.draw()
 
