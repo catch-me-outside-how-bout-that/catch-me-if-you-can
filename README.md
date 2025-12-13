@@ -2,7 +2,7 @@
 
 ## Project Overview
 **Catch Me If You Can** is a self-built 2D chase game inspired by the classic playground game *Fangis*.  
-It runs on an **ESP32 microcontroller** using **MicroPython** and is displayed on an **8×8 LED matrix** (HT16K33 or NeoPixel version).
+It runs on an **ESP32 microcontroller** using **MicroPython** and is displayed on an **8×8 LED NeonPixel Matrix**.
 
 Players move their character via a **joystick** and activate special abilities using a **dual-button module**.  
 The game is fully portable thanks to a **3.7V Li-Ion battery** and a **custom 3D-printed enclosure**.
@@ -24,7 +24,7 @@ Random obstacles add strategic depth, and special abilities such as **Speed Boos
 ## Hardware Components
 
 - **ESP32 Dev Board** (MicroPython compatible)  
-- **8×8 LED Matrix** (HT16K33 or WS2812 NeoPixel version)  
+- **8×8 LED Matrix** (RGB‑LEDs, 5V)  
 - **Joystick A06-05 TZT** for directional control  
 - **M5Stack Dual-Button Unit** (red + blue) for abilities  
 - **DFPlayer Mini + speaker** for background music & sound effects  
@@ -57,7 +57,7 @@ The LED matrix will display your assigned role:
 - Avoid the Hunter until the **2-minute timer** expires.  
 - If time runs out → **Runner wins**.
 
-Special abilities (Speed Boost & Invisibility) can be activated with the dual-button module and are shown on the display.
+Special abilities (Speed Boost & Invisibility) can be activated with the dual-button module.
 
 ---
 
@@ -70,7 +70,7 @@ Special abilities (Speed Boost & Invisibility) can be activated with the dual-bu
 
 | Component | Pins / Connection |
 |----------|-------------------|
-| **HT16K33 LED Matrix** | SDA → GPIO 21, SCL → GPIO 22, VCC 5V, GND |
+| **8×8 NeoPixel Matrix (WS2812)** | DIN → GPIO D5 (G0), VCC 5V, GND, optional Level Shifter to 5V |
 | **Joystick A06-05** | VRX → GPIO 3, VRY → GPIO 4, VCC 3.3V, GND |
 | **Red Button** | Connected to Modulino **A0** |
 | **Blue Button** | Connected to Modulino **A1** |
@@ -87,12 +87,7 @@ Special abilities (Speed Boost & Invisibility) can be activated with the dual-bu
 3. Copy all files from the `src/` folder to the board.  
 4. Make sure the following libraries are present on the device:  
    - `dfplayer.py`  
-   - `ht16k33.py`  
+   - `neopixel` (MicroPython‑Modul for WS2812) 
    - `espnow` (built-in on ESP32 MicroPython)  
 5. Reset the board — the game starts automatically.
-
----
-# Code
-
-
 
