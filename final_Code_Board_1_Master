@@ -1,10 +1,18 @@
 from time import sleep, time
-from machine import Pin, ADC
+from machine import Pin, ADC, UART
 import neopixel
 import random
 import network
 import espnow
 import ujson
+
+# --------------------------------------------
+# DFPLAYER (UART0 → Pins "TX" / "RX")
+# --------------------------------------------
+from dfplayer import DFPlayer   # dozenten-version
+uart = UART(0, tx=Pin("TX"), rx=Pin("RX"))
+mp3 = DFPlayer(uart)
+mp3.volume = 30   # 0–30
 
 def jetzt_ms():
     return int(time() * 1000)
@@ -31,8 +39,8 @@ CENTER_Y = sum(samples_y) // len(samples_y)
 DEADZONE = 150
 print("CENTER_X:", CENTER_X, "CENTER_Y:", CENTER_Y)
 
-MOVE_DELAY_MS = 120
-SPEED_BOOST_DELAY_MS = 70
+MOVE_DELAY_MS = 80
+SPEED_BOOST_DELAY_MS = 40
 
 # ---------------------------------------------------------
 # NEOPIXEL 8x8 MATRIX
@@ -146,9 +154,9 @@ e = espnow.ESPNow()
 e.active(True)
 
 # HIER: MAC-ADRESSE VON BOARD 2 EINTRAGEN!
-peer_mac = b'H\xcaC/\x08\x14'
+peer_mac_slave = b'H\xcaC/\x08\x14'
 try:
-    e.add_peer(peer_mac)
+    e.add_peer(peer_mac_slave)
 except Exception as err:
     print("add_peer:", err)
 
@@ -156,6 +164,8 @@ except Exception as err:
 p2_dir = None
 p2_red = 0
 p2_blue = 0
+p2_use_red = 0
+p2_use_blue = 0
 
 # ---------------------------------------------------------
 # HILFSFUNKTIONEN
@@ -316,7 +326,7 @@ def warte_auf_restart():
 # ESP-NOW: eingehende INPUTS von Board 2
 # ---------------------------------------------------------
 def handle_incoming():
-    global p2_dir, p2_red, p2_blue
+    global p2_dir, p2_red, p2_blue, p2_use_red, p2_use_blue
     try:
         mac, msg = e.recv(0)   # 0 = non-blocking
     except OSError:
@@ -332,11 +342,18 @@ def handle_incoming():
         p2_dir = data.get("dir", None)
         p2_red = data.get("red", 0)
         p2_blue = data.get("blue", 0)
+        p2_use_red = data.get("use_red", 0)
+        p2_use_blue = data.get("use_blue", 0)
 
 # ---------------------------------------------------------
 # ESP-NOW: State an Board 2
 # ---------------------------------------------------------
-def send_state(p1_x, p1_y, p2_x, p2_y, rolle, map_index, remaining_ms):
+def send_state(p1_x, p1_y, p2_x, p2_y, rolle, map_index,
+               remaining_ms, invis_p1, invis_p2):
+    jetzt = jetzt_ms()
+    p1_visible = (jetzt >= invis_p1)
+    p2_visible = (jetzt >= invis_p2)
+
     payload = {
         "type": "state",
         "p1_x": p1_x,
@@ -345,10 +362,12 @@ def send_state(p1_x, p1_y, p2_x, p2_y, rolle, map_index, remaining_ms):
         "p2_y": p2_y,
         "role_for_peer": "Faenger" if rolle == "Wegrenner" else "Wegrenner",
         "map_index": map_index,
-        "remaining_ms": remaining_ms
+        "remaining_ms": remaining_ms,
+        "p1_visible": p1_visible,
+        "p2_visible": p2_visible
     }
     try:
-        e.send(peer_mac, ujson.dumps(payload))
+        e.send(peer_mac_slave, ujson.dumps(payload))
     except:
         pass
 
@@ -360,7 +379,7 @@ def send_start(map_index, rolle_fuer_peer):
         "start_ts": jetzt_ms()
     }
     try:
-        e.send(peer_mac, ujson.dumps(payload))
+        e.send(peer_mac_slave, ujson.dumps(payload))
     except:
         pass
 
@@ -369,9 +388,8 @@ def send_start(map_index, rolle_fuer_peer):
 # ---------------------------------------------------------
 
 def starte_spiel():
-    global p2_dir
+    global p2_dir, p2_use_red, p2_use_blue
 
-    # Spieler Start
     p1_x, p1_y = 7, 7
     p2_x, p2_y = 0, 0
 
@@ -379,7 +397,7 @@ def starte_spiel():
     map_index = zufaellige_map_index()
     karte = maps[map_index]
 
-    # Powerup (nur für P1)
+    # Powerup P1
     used_red = 0
     used_blue = 0
     last_red = 1
@@ -387,32 +405,48 @@ def starte_spiel():
     invis = 0
     speed = 0
 
+    # Powerup P2
+    invis_p2 = 0
+    speed_p2 = 0
+
     p2_dir = None
+    p2_use_red = 0
+    p2_use_blue = 0
     last_move_p1 = 0
     last_move_p2 = 0
 
     zeige_startsequenz(rolle)
 
-    # Infos an Board 2 schicken
     rolle_fuer_peer = "Faenger" if rolle == "Wegrenner" else "Wegrenner"
     send_start(map_index, rolle_fuer_peer)
 
     game_start = jetzt_ms()
     last_state_send = 0
+    
+    # ----------------------------------------
+    # 🔊 1. Hintergrundmusik starten
+    # ----------------------------------------
+    mp3.pause()
+    sleep(0.2)
+    mp3.play_track(1, 1)   # Track 1 = Hintergrundmusik
 
-    # -------------------------------
-    # LOOP
-    # -------------------------------
     while True:
         jetzt = jetzt_ms()
 
-        # TIMER abgelaufen?  SEND GAME OVER
+        # ----------------------------------------
+        # ⏳ TIMEOUT
+        # ----------------------------------------
         if jetzt - game_start >= GAME_DURATION_MS:
 
+            mp3.pause()
+            sleep(0.2)
+            mp3.play_track(1, 2)   # Game Over Sound
+            sleep (0.2)
+      
             won = False if rolle == "Faenger" else True
             game_over_packet = {"type": "game_over", "won": won}
             try:
-                e.send(peer_mac, ujson.dumps(game_over_packet))
+                e.send(peer_mac_slave, ujson.dumps(game_over_packet))
             except:
                 pass
 
@@ -424,6 +458,15 @@ def starte_spiel():
 
         # INPUT von Board 2
         handle_incoming()
+
+        # P2-Powerups aus use_red/use_blue
+        if p2_use_red:
+            invis_p2 = jetzt + 3000
+            p2_use_red = 0
+        
+        if p2_use_blue:
+            speed_p2 = jetzt + 3000
+            p2_use_blue = 0
 
         # BUTTONS P1 (Powerups)
         red = button_red.value()
@@ -446,7 +489,6 @@ def starte_spiel():
 
         if richtung_p1 and (jetzt - last_move_p1) >= delay_p1:
             nx, ny = p1_x, p1_y
-
             if richtung_p1 == "UP": ny -= 1
             elif richtung_p1 == "DOWN": ny += 1
             elif richtung_p1 == "LEFT": nx -= 1
@@ -467,9 +509,9 @@ def starte_spiel():
             last_move_p1 = jetzt
 
         # Bewegung P2
-        if p2_dir and (jetzt - last_move_p2) >= MOVE_DELAY_MS:
+        delay_p2 = SPEED_BOOST_DELAY_MS if jetzt < speed_p2 else MOVE_DELAY_MS
+        if p2_dir and (jetzt - last_move_p2) >= delay_p2:
             nx2, ny2 = p2_x, p2_y
-
             if p2_dir == "UP": ny2 -= 1
             elif p2_dir == "DOWN": ny2 += 1
             elif p2_dir == "LEFT": nx2 -= 1
@@ -480,13 +522,12 @@ def starte_spiel():
 
             last_move_p2 = jetzt
 
-        # FANG? 🔵 SEND GAME OVER
+        # FANG?
         if p1_x == p2_x and p1_y == p2_y:
-
             won = True if rolle == "Faenger" else False
             game_over_packet = {"type": "game_over", "won": won}
             try:
-                e.send(peer_mac, ujson.dumps(game_over_packet))
+                e.send(peer_mac_slave, ujson.dumps(game_over_packet))
             except:
                 pass
 
@@ -495,30 +536,28 @@ def starte_spiel():
             return
 
         # Render
-        display.set_icon(karte, color=(15, 15, 0))  # Wände
+        display.set_icon(karte, color=(15, 15, 0))
 
-        # Spielerfarben: Fänger = blau, Wegrenner = rot
         if rolle == "Faenger":
-            # P1 ist Fänger, P2 ist Wegrenner
-            p1_color = (0, 0, 60)   # Fänger (du) = blau
-            p2_color = (60, 0, 0)   # Wegrenner = rot
+            p1_color = (0, 0, 60)
+            p2_color = (60, 0, 0)
         else:
-            # P1 ist Wegrenner, P2 ist Fänger
-            p1_color = (60, 0, 0)   # Wegrenner (du) = rot
-            p2_color = (0, 0, 60)   # Fänger = blau
+            p1_color = (60, 0, 0)
+            p2_color = (0, 0, 60)
 
-        # P2 immer sichtbar
-        display.plot(p2_x, p2_y, 1, color=p2_color)
+        p1_visible = (jetzt >= invis)
+        p2_visible = (jetzt >= invis_p2)
 
-        # P1 nur sichtbar, wenn Unsichtbarkeit abgelaufen
-        if jetzt >= invis:
+        if p2_visible:
+            display.plot(p2_x, p2_y, 1, color=p2_color)
+        if p1_visible:
             display.plot(p1_x, p1_y, 1, color=p1_color)
 
         display.draw()
 
-        # State an Board 2 schicken
         if jetzt - last_state_send >= 150:
-            send_state(p1_x, p1_y, p2_x, p2_y, rolle, map_index, remaining)
+            send_state(p1_x, p1_y, p2_x, p2_y, rolle,
+                       map_index, remaining, invis, invis_p2)
             last_state_send = jetzt
 
         sleep(0.02)
