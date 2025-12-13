@@ -45,8 +45,8 @@ This triggers the start sequence.
 ### 2. Role Assignment
 The LED matrix will display your assigned role:
 
-- 🔴 **Red icon → Hunter**  
-- 🔵 **Blue icon → Runner**
+- 🔴 **Red icon → Runner**  
+- 🔵 **Blue icon → Hunter**
 
 ### 3. Objectives
 #### If you are the Hunter:
