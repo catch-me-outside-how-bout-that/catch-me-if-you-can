@@ -91,3 +91,12 @@ Special abilities (Speed Boost & Invisibility) can be activated with the dual-bu
    - `espnow` (built-in on ESP32 MicroPython)  
 5. Reset the board — the game starts automatically.
 
+---
+
+## Concept Video
+
+https://github.com/user-attachments/assets/63190322-8a87-460b-9061-33283b1976ac
+
+
+
+
