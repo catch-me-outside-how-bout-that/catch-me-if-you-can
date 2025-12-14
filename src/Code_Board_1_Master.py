@@ -177,6 +177,12 @@ def zufaelliger_spieler():
 def zufaellige_map_index():
     return random.randrange(len(maps))
 
+def game_over_sound():
+    mp3.pause()
+    sleep(0.2)
+    mp3.play_track(1, 2)
+    sleep(0.2)
+
 def zeige_startsequenz(meine_rolle):
     """
     Ersetzt den Scroll-Text durch eine Rollen-Animation:
@@ -437,11 +443,7 @@ def starte_spiel():
         # ⏳ TIMEOUT
         # ----------------------------------------
         if jetzt - game_start >= GAME_DURATION_MS:
-
-            mp3.pause()
-            sleep(0.2)
-            mp3.play_track(1, 2)   # Game Over Sound
-            sleep (0.2)
+            game_over_sound()
       
             won = False if rolle == "Faenger" else True
             game_over_packet = {"type": "game_over", "won": won}
@@ -524,6 +526,7 @@ def starte_spiel():
 
         # FANG?
         if p1_x == p2_x and p1_y == p2_y:
+            game_over_sound()
             won = True if rolle == "Faenger" else False
             game_over_packet = {"type": "game_over", "won": won}
             try:
